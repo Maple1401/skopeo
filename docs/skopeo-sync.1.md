@@ -66,6 +66,8 @@ Print usage statement.
 
 **--scoped** Prefix images with the source image path, so that multiple images with the same name can be stored at _destination_.
 
+**--append-suffix** _tag-suffix_ String to append to destination tags.
+
 **--preserve-digests** Preserve the digests during copying. Fail if the digest cannot be preserved. Consider using `--all` at the same time.
 
 **--remove-signatures** Do not copy signatures, if any, from _source-image_. This is necessary when copying a signed image to a destination which does not support signatures.
@@ -73,6 +75,11 @@ Print usage statement.
 **--sign-by** _key-id_
 
 Add a “simple signing” signature using that key ID for an image name corresponding to _destination-image_
+
+**--sign-by-sigstore** _param-file_
+
+Add a sigstore signature based on the options in the specified containers sigstore signing parameter file, _param-file_.
+See containers-sigstore-signing-params.yaml(5) for details about the file format.
 
 **--sign-by-sigstore-private-key** _path_
 
@@ -126,7 +133,7 @@ The password to access the destination registry.
 ## EXAMPLES
 
 ### Synchronizing to a local directory
-```
+```console
 $ skopeo sync --src docker --dest dir registry.example.com/busybox /media/usb
 ```
 Images are located at:
@@ -144,7 +151,7 @@ Images are located at:
 /media/usb/busybox:1-glibc
 ```
 Sync run
-```
+```console
 $ skopeo sync --src dir --dest docker /media/usb/busybox:1-glibc my-registry.local.lan/test/
 ```
 Destination registry content:
@@ -154,7 +161,7 @@ my-registry.local.lan/test/busybox   1-glibc
 ```
 
 ### Synchronizing to a local directory, scoped
-```
+```console
 $ skopeo sync --src docker --dest dir --scoped registry.example.com/busybox /media/usb
 ```
 Images are located at:
@@ -167,8 +174,8 @@ Images are located at:
 ```
 
 ### Synchronizing to a container registry
-```
-skopeo sync --src docker --dest docker registry.example.com/busybox my-registry.local.lan
+```console
+$ skopeo sync --src docker --dest docker registry.example.com/busybox my-registry.local.lan
 ```
 Destination registry content:
 ```
@@ -177,13 +184,23 @@ registry.local.lan/busybox   1-glibc, 1-musl, 1-ubuntu, ..., latest
 ```
 
 ### Synchronizing to a container registry keeping the repository
-```
-skopeo sync --src docker --dest docker registry.example.com/repo/busybox my-registry.local.lan/repo
+```console
+$ skopeo sync --src docker --dest docker registry.example.com/repo/busybox my-registry.local.lan/repo
 ```
 Destination registry content:
 ```
 REPO                              TAGS
 registry.local.lan/repo/busybox   1-glibc, 1-musl, 1-ubuntu, ..., latest
+```
+
+### Synchronizing to a container registry with tag suffix
+```console
+$ skopeo sync --src docker --dest docker --append-suffix '-mirror' registry.example.com/busybox my-registry.local.lan
+```
+Destination registry content:
+```
+REPO                         TAGS
+registry.local.lan/busybox   1-glibc-mirror, 1-musl-mirror, 1-ubuntu-mirror, ..., latest-mirror
 ```
 
 ### YAML file content (used _source_ for `**--src yaml**`)
@@ -210,8 +227,8 @@ quay.io:
             - latest
 ```
 If the yaml filename is `sync.yml`, sync run:
-```
-skopeo sync --src yaml --dest docker sync.yml my-registry.local.lan/repo/
+```console
+$ skopeo sync --src yaml --dest docker sync.yml my-registry.local.lan/repo/
 ```
 This will copy the following images:
 - Repository `registry.example.com/busybox`: all images, as no tags are specified.

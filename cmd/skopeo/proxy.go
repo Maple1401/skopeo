@@ -75,12 +75,14 @@ import (
 	"github.com/containers/image/v5/manifest"
 	ocilayout "github.com/containers/image/v5/oci/layout"
 	"github.com/containers/image/v5/pkg/blobinfocache"
+	"github.com/containers/image/v5/transports"
 	"github.com/containers/image/v5/transports/alltransports"
 	"github.com/containers/image/v5/types"
 	dockerdistributionerrcode "github.com/docker/distribution/registry/api/errcode"
 	dockerdistributionapi "github.com/docker/distribution/registry/api/v2"
 	"github.com/opencontainers/go-digest"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
@@ -92,7 +94,8 @@ import (
 // 0.2.2: Added support for fetching image configuration as OCI
 // 0.2.3: Added GetFullConfig
 // 0.2.4: Added OpenImageOptional
-const protocolVersion = "0.2.4"
+// 0.2.5: Added LayerInfoJSON
+const protocolVersion = "0.2.5"
 
 // maxMsgSize is the current limit on a packet size.
 // Note that all non-metadata (i.e. payload data) is sent over a pipe.
@@ -171,6 +174,14 @@ type proxyHandler struct {
 	images map[uint32]*openImage
 	// activePipes maps from "pipeid" to a pipe + goroutine pair
 	activePipes map[uint32]*activePipe
+}
+
+// convertedLayerInfo is the reduced form of the OCI type BlobInfo
+// Used in the return value of GetLayerInfo
+type convertedLayerInfo struct {
+	Digest    digest.Digest `json:"digest"`
+	Size      int64         `json:"size"`
+	MediaType string        `json:"media_type"`
 }
 
 // Initialize performs one-time initialization, and returns the protocol version
@@ -588,10 +599,12 @@ func (h *proxyHandler) GetBlob(args []interface{}) (replyBuf, error) {
 
 	piper, f, err := h.allocPipe()
 	if err != nil {
+		blobr.Close()
 		return ret, err
 	}
 	go func() {
 		// Signal completion when we return
+		defer blobr.Close()
 		defer f.wg.Done()
 		verifier := d.Verifier()
 		tr := io.TeeReader(blobr, verifier)
@@ -611,6 +624,56 @@ func (h *proxyHandler) GetBlob(args []interface{}) (replyBuf, error) {
 	ret.value = blobSize
 	ret.fd = piper
 	ret.pipeid = uint32(f.w.Fd())
+	return ret, nil
+}
+
+// GetLayerInfo returns data about the layers of an image, useful for reading the layer contents.
+//
+// This needs to be called since the data returned by GetManifest() does not allow to correctly
+// calling GetBlob() for the containers-storage: transport (which doesn’t store the original compressed
+// representations referenced in the manifest).
+func (h *proxyHandler) GetLayerInfo(args []interface{}) (replyBuf, error) {
+	h.lock.Lock()
+	defer h.lock.Unlock()
+
+	var ret replyBuf
+
+	if h.sysctx == nil {
+		return ret, fmt.Errorf("client error: must invoke Initialize")
+	}
+
+	if len(args) != 1 {
+		return ret, fmt.Errorf("found %d args, expecting (imgid)", len(args))
+	}
+
+	imgref, err := h.parseImageFromID(args[0])
+	if err != nil {
+		return ret, err
+	}
+
+	ctx := context.TODO()
+
+	err = h.cacheTargetManifest(imgref)
+	if err != nil {
+		return ret, err
+	}
+	img := imgref.cachedimg
+
+	layerInfos, err := img.LayerInfosForCopy(ctx)
+	if err != nil {
+		return ret, err
+	}
+
+	if layerInfos == nil {
+		layerInfos = img.LayerInfos()
+	}
+
+	var layers []convertedLayerInfo
+	for _, layer := range layerInfos {
+		layers = append(layers, convertedLayerInfo{layer.Digest, layer.Size, layer.MediaType})
+	}
+
+	ret.value = layers
 	return ret, nil
 }
 
@@ -640,6 +703,17 @@ func (h *proxyHandler) FinishPipe(args []interface{}) (replyBuf, error) {
 	err = f.err
 	delete(h.activePipes, pipeid)
 	return ret, err
+}
+
+// close releases all resources associated with this proxy backend
+func (h *proxyHandler) close() {
+	for _, image := range h.images {
+		err := image.src.Close()
+		if err != nil {
+			// This shouldn't be fatal
+			logrus.Warnf("Failed to close image %s: %v", transports.ImageName(image.cachedimg.Reference()), err)
+		}
+	}
 }
 
 // send writes a reply buffer to the socket
@@ -736,6 +810,8 @@ func (h *proxyHandler) processRequest(readBytes []byte) (rb replyBuf, terminate 
 		rb, err = h.GetFullConfig(req.Args)
 	case "GetBlob":
 		rb, err = h.GetBlob(req.Args)
+	case "GetLayerInfo":
+		rb, err = h.GetLayerInfo(req.Args)
 	case "FinishPipe":
 		rb, err = h.FinishPipe(req.Args)
 	case "Shutdown":
@@ -755,6 +831,7 @@ func (opts *proxyOptions) run(args []string, stdout io.Writer) error {
 		images:      make(map[uint32]*openImage),
 		activePipes: make(map[uint32]*activePipe),
 	}
+	defer handler.close()
 
 	// Convert the socket FD passed by client into a net.FileConn
 	fd := os.NewFile(uintptr(opts.sockFd), "sock")
